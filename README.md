@@ -1,5 +1,8 @@
 # SlopSniffer
 
+<img width="1918" height="774" alt="image" src="https://github.com/user-attachments/assets/d011e378-2396-4230-8df4-c14810095b96" />
+
+
 A drop-in [RockSniffer](https://github.com/kokolihapihvi/RockSniffer)
 replacement built as a [SlopSmith](https://github.com/byrongamatos/slopsmith)
 plugin. It lets your existing Rocksmith-streaming OBS overlays keep
