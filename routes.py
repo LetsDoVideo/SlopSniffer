@@ -26,7 +26,6 @@ note_detect ``note:hit`` / ``note:miss`` events on ``window.slopsmith``).
 
 import json
 import threading
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # RockSniffer's default port. Existing widgets hardcode 127.0.0.1:9938
@@ -59,6 +58,32 @@ _addons_dir = None
 # at /api/song/<encoded-filename>/art; we fetch once per song and cache.
 _art_cache = {}
 _art_lock = threading.Lock()
+
+# Context primitives captured in setup(), used for DIRECT in-process
+# metadata/art access. routes.py runs inside the SlopSmith server process,
+# so we can read meta_db, the DLC dir, and the art cache directly off disk --
+# no HTTP round-trip to a port we'd have to guess. The Desktop build binds
+# the Python server to a DYNAMIC port chosen at launch (confirmed in the
+# Electron main process: it spawns python, waits for it to report its port,
+# then loads http://127.0.0.1:<that port>), so there is no fixed port to hit
+# and the OBS browser source can't reach it either. Reading files directly
+# sidesteps all of that.
+#   _ctx_meta_db          -- shared MetadataDB (.get(filename, mtime, size))
+#   _ctx_get_dlc_dir()    -- DLC folder Path
+#   _ctx_get_art_cache_dir() -- SlopSmith's art_cache dir (cached PNGs)
+_ctx_meta_db = None
+_ctx_get_dlc_dir = None
+_ctx_get_art_cache_dir = None
+
+
+def _art_safe_name(filename):
+    """SlopSmith's art-cache key: filename with '/' and ' ' -> '_', .png.
+
+    Mirrors server.py exactly:
+        safe_name = filename.replace("/", "_").replace(" ", "_")
+        cached = ART_CACHE_DIR / f"{safe_name}.png"
+    """
+    return filename.replace("/", "_").replace(" ", "_") + ".png"
 
 
 def _empty_state():
@@ -261,10 +286,17 @@ def _start_sniffer_server():
 # ── Album art ───────────────────────────────────────────────────────────
 
 def _fetch_album_art_b64(filename):
-    """Fetch + base64-encode SlopSmith's album art for ``filename``.
+    """Return base64 album art for ``filename`` by reading it off disk.
 
-    Cached per filename. Returns '' on any failure (the widget tolerates
-    an empty cover -- it just shows no image)."""
+    SlopSmith caches extracted album art as PNG in its art_cache dir, keyed
+    by the filename with '/' and ' ' replaced by '_'. Any song the user has
+    seen in the library grid already has its art cached, so we just read
+    that PNG -- no HTTP, no server port (which is dynamic on Desktop), no
+    PSARC parsing. If the cache file isn't there yet, we fall back to
+    extracting from the PSARC the same way the server does (best-effort;
+    needs PIL, which the SlopSmith env has). Cached per filename in-process.
+    Returns '' on any failure (the widget tolerates an empty cover)."""
+    import os
     if not filename:
         return ""
     with _art_lock:
@@ -273,28 +305,86 @@ def _fetch_album_art_b64(filename):
     b64 = ""
     try:
         import base64
-        from urllib.parse import quote
-        # SlopSmith's art route is declared as:
-        #   @app.get("/api/song/{filename:path}/art")
-        # The {filename:path} converter captures slashes as real path
-        # separators, so the filename (which can be a RELATIVE PATH under
-        # the DLC dir, e.g. "cdlc favorites/ACDC - Back In Black_p.psarc")
-        # must keep its "/" LITERAL -- percent-encoding the slash to %2F
-        # breaks the route match. We therefore quote everything that needs
-        # escaping (spaces, etc.) but keep "/" in the safe set. screen.js
-        # sends us the decoded filename, so this single encode is correct.
-        enc = quote(filename, safe="/!~*'()")
-        url = "http://127.0.0.1:8000/api/song/%s/art" % enc
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            if resp.status == 200:
-                b64 = base64.b64encode(resp.read()).decode("ascii")
+        # 1) Fast path: read SlopSmith's already-cached PNG from disk.
+        cache_dir = _ctx_get_art_cache_dir() if _ctx_get_art_cache_dir else None
+        if cache_dir:
+            cached_png = os.path.join(str(cache_dir), _art_safe_name(filename))
+            if os.path.isfile(cached_png):
+                with open(cached_png, "rb") as fh:
+                    b64 = base64.b64encode(fh.read()).decode("ascii")
+                if _log:
+                    _log.info("SlopSniffer: album art from cache (%d b64 chars)", len(b64))
+
+        # 2) Fallback: extract art from the PSARC directly, like the server
+        #    does (unpack -> largest .dds -> PNG). Only if not cached.
+        if not b64:
+            b64 = _extract_art_from_psarc(filename)
+
+        if not b64 and _log:
+            _log.info("SlopSniffer: no album art found for %r yet", filename)
     except Exception as exc:  # noqa: BLE001 -- art is best-effort
         if _log:
-            _log.debug("SlopSniffer: album art fetch failed for %r: %s", filename, exc)
+            _log.warning("SlopSniffer: album art read error for %r: %s", filename, exc)
         b64 = ""
     with _art_lock:
         _art_cache[filename] = b64
     return b64
+
+
+def _extract_art_from_psarc(filename):
+    """Best-effort: extract album art from the PSARC on disk and return it
+    as base64 PNG. Mirrors SlopSmith's own extraction (largest embedded
+    .dds -> PNG via PIL). Returns '' if anything is unavailable."""
+    import os
+    import base64
+    import tempfile
+    import shutil
+    if _ctx_get_dlc_dir is None:
+        return ""
+    try:
+        dlc = _ctx_get_dlc_dir()
+        if not dlc:
+            return ""
+        psarc_path = os.path.join(str(dlc), filename)
+        if not os.path.isfile(psarc_path):
+            return ""
+        # Only PSARCs carry embedded .dds art needing extraction; sloppak /
+        # loose-folder songs serve a cover file the cache path already
+        # covers, so skip extraction for non-psarc here.
+        if not psarc_path.lower().endswith(".psarc"):
+            return ""
+        # Use SlopSmith's own psarc unpacker + PIL, imported lazily so a
+        # missing dep just disables this fallback rather than breaking load.
+        try:
+            from psarc import unpack_psarc  # SlopSmith lib/ is on sys.path
+        except Exception:
+            return ""
+        try:
+            from PIL import Image
+        except Exception:
+            return ""
+        from pathlib import Path
+        tmp = tempfile.mkdtemp(prefix="slopsniffer_art_")
+        try:
+            unpack_psarc(str(psarc_path), tmp)
+            dds = sorted(Path(tmp).rglob("*.dds"),
+                         key=lambda p: p.stat().st_size, reverse=True)
+            if not dds:
+                return ""
+            img = Image.open(str(dds[0])).convert("RGB")
+            out = os.path.join(tmp, "_art.png")
+            img.save(out, "PNG")
+            with open(out, "rb") as fh:
+                b64 = base64.b64encode(fh.read()).decode("ascii")
+            if _log:
+                _log.info("SlopSniffer: album art extracted from PSARC (%d b64 chars)", len(b64))
+            return b64
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        if _log:
+            _log.debug("SlopSniffer: PSARC art extraction failed for %r: %s", filename, exc)
+        return ""
 
 
 # Metadata cache: filename -> {"album": str, "year": int}. SlopSmith's
@@ -306,14 +396,16 @@ _meta_lock = threading.Lock()
 
 
 def _fetch_song_meta(filename):
-    """Fetch {album, year} for a song from SlopSmith's detail endpoint.
+    """Get {album, year} for a song by reading meta_db DIRECTLY in-process.
 
-    GET /api/song/{filename:path} returns the cached metadata dict
-    (title, artist, album, year, duration, ...). We only need album and
-    year -- the browser already gave us the rest. Returns
-    {"album": "", "year": 0} on any failure (widget tolerates blanks).
-    Runs in-process against :8000, which is reachable here (the
-    OBS-can't-reach-8000 issue is browser-side only)."""
+    SlopSmith's song_info WebSocket payload (what the browser sees) does
+    NOT include album or year. Rather than HTTP-fetch the song-detail
+    endpoint (whose port we can't reliably know on the Desktop build), we
+    read the shared MetadataDB the same way the server's own route does:
+    resolve the file under the DLC dir, stat it for the cache key, and
+    call meta_db.get(cache_key, mtime, size). Returns {"album","year"}.
+    """
+    import os
     empty = {"album": "", "year": 0}
     if not filename:
         return dict(empty)
@@ -322,25 +414,44 @@ def _fetch_song_meta(filename):
             return dict(_meta_cache[filename])
     result = dict(empty)
     try:
-        import json as _json
-        from urllib.parse import quote
-        # Same {filename:path} route convention as art: keep "/" literal.
-        enc = quote(filename, safe="/!~*'()")
-        url = "http://127.0.0.1:8000/api/song/%s" % enc
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            if resp.status == 200:
-                meta = _json.loads(resp.read().decode("utf-8"))
-                if isinstance(meta, dict):
-                    result["album"] = str(meta.get("album", "") or "")
-                    # year is stored as TEXT and may be "", "1980", etc.
-                    year_raw = meta.get("year", "") or ""
-                    try:
-                        result["year"] = int(str(year_raw).strip()) if str(year_raw).strip() else 0
-                    except (TypeError, ValueError):
-                        result["year"] = 0
+        if _ctx_meta_db is None or _ctx_get_dlc_dir is None:
+            if _log:
+                _log.warning("SlopSniffer: meta lookup unavailable (no context db/dlc)")
+            raise RuntimeError("no meta context")
+        dlc = _ctx_get_dlc_dir()
+        if not dlc:
+            raise RuntimeError("DLC dir not configured")
+        # Resolve the song file under the DLC dir. screen.js sends the
+        # filename as the relative path SlopSmith uses (e.g.
+        # "cdlc favorites/ACDC - Back In Black_p.psarc").
+        song_path = os.path.join(str(dlc), filename)
+        if not os.path.isfile(song_path):
+            if _log:
+                _log.warning("SlopSniffer: song file not found for meta: %s", song_path)
+            raise FileNotFoundError(song_path)
+        st = os.stat(song_path)
+        # The server canonicalises the cache key as the POSIX relative
+        # path under the DLC dir -- which is exactly `filename` as sent.
+        cache_key = filename.replace("\\", "/")
+        meta = _ctx_meta_db.get(cache_key, st.st_mtime, st.st_size)
+        if meta is None:
+            # mtime/size mismatch or not yet cached. Try the bare key too.
+            if _log:
+                _log.info("SlopSniffer: meta_db miss for %r (mtime=%s size=%s)",
+                          cache_key, st.st_mtime, st.st_size)
+        if isinstance(meta, dict):
+            result["album"] = str(meta.get("album", "") or "")
+            year_raw = meta.get("year", "") or ""
+            try:
+                result["year"] = int(str(year_raw).strip()) if str(year_raw).strip() else 0
+            except (TypeError, ValueError):
+                result["year"] = 0
+            if _log:
+                _log.info("SlopSniffer: meta for %r -> album=%r year=%r",
+                          filename, result["album"], result["year"])
     except Exception as exc:  # noqa: BLE001 -- metadata is best-effort
         if _log:
-            _log.debug("SlopSniffer: song meta fetch failed for %r: %s", filename, exc)
+            _log.warning("SlopSniffer: song meta lookup failed for %r: %s", filename, exc)
         result = dict(empty)
     with _meta_lock:
         _meta_cache[filename] = dict(result)
@@ -474,8 +585,13 @@ def _apply_browser_state(incoming):
 
 def setup(app, context):
     """Plugin entry point. Registers the ingest route and starts :9938."""
-    global _log, _output_dir, _addons_dir
+    global _log, _output_dir, _addons_dir, _ctx_meta_db, _ctx_get_dlc_dir, _ctx_get_art_cache_dir
     _log = context.get("log")
+    # Capture the metadata DB and DLC-dir accessor for direct in-process
+    # album/year lookups (avoids guessing the server's HTTP port).
+    _ctx_meta_db = context.get("meta_db")
+    _ctx_get_dlc_dir = context.get("get_dlc_dir")
+    _ctx_get_art_cache_dir = context.get("get_art_cache_dir")
     # Write the RockSniffer text-file outputs under the plugin's config
     # dir so they're easy to find and survive restarts.
     import os
