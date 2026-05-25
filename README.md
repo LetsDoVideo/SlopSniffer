@@ -19,21 +19,40 @@ SlopSniffer does three things:
 
 ## Install
 
-SlopSniffer is a plain plugin, no build step. Clone it into SlopSmith's
-`plugins/` folder under the directory name `slopsniffer`:
+**Use SlopSmith's built-in Plugin Manager**
+
+1. In SlopSmith, open the **Plugins** menu → **Plugin Manager**.
+2. In the **Install Plugin** box, paste this repo's URL:
+   `https://github.com/LetsDoVideo/SlopSniffer.git`
+3. Click **Install**, then **restart SlopSmith** when prompted.
+
+That's it. The Plugin Manager fetches the plugin into your plugins
+folder for you. After restart, SlopSniffer appears under **Installed
+Plugins**, and you should see a log line like
+`SlopSniffer: serving RockSniffer JSON on 127.0.0.1:9938`.
+
+<details>
+<summary>Manual install (advanced — only if you're not using the Plugin Manager)</summary>
+
+SlopSniffer is a plain plugin with no build step, so you can also drop
+it into SlopSmith's plugins folder by hand. The plugins directory
+location depends on your platform (see the SlopSmith Desktop README);
+clone the repo into it, then restart SlopSmith:
 
 ```
-cd plugins
-git clone https://github.com/LetsDoVideo/SlopSniffer.git slopsniffer
+git clone https://github.com/LetsDoVideo/SlopSniffer.git
+# move the cloned folder into SlopSmith's plugins/ directory, then
 # restart SlopSmith
 ```
 
-Restart SlopSmith. On startup you should see a log line like
-`SlopSniffer: serving RockSniffer JSON on 127.0.0.1:9938`.
+The folder name doesn't matter — the plugin's `id` (`slopsniffer`) comes
+from `plugin.json`, not the directory name.
 
-> If you still have the real **RockSniffer** running, it already owns
-> port 9938 and SlopSniffer will log a bind warning and skip the JSON
-> server. Close RockSniffer first.
+</details>
+
+> **Already running the real RockSniffer?** It owns port 9938, so
+> SlopSniffer will log a bind warning and skip its JSON server until you
+> close RockSniffer. You only need one of them.
 
 ## Verify it's working
 
@@ -46,13 +65,20 @@ artist, and a `songTimer` that advances as the song plays.
 The widgets live in this plugin's `addons/` folder and load directly
 from disk via a `file://` URL — exactly like RockSniffer's own addons.
 
+First, find where the plugin was installed. If you used the Plugin
+Manager, the folder lives in SlopSmith's plugins directory (the location
+varies by platform — see the SlopSmith Desktop README for your OS; on
+Windows it's typically under `%APPDATA%\slopsmith-desktop\plugins\`).
+The folder will be named after the repo (e.g. `SlopSniffer`).
+
 1. In OBS, add a **Browser** source.
 2. Check **Local file**.
-3. Browse to the widget HTML inside this plugin's `addons/` folder:
+3. Browse to the widget HTML inside the installed plugin's `addons/`
+   folder:
    - Now-playing overlay:
-     `…/plugins/slopsniffer/addons/current_song/current_song.html`
+     `…/plugins/<SlopSniffer folder>/addons/current_song/current_song.html`
    - Note-streak banner:
-     `…/plugins/slopsniffer/addons/note_streaks/note_streaks.html`
+     `…/plugins/<SlopSniffer folder>/addons/note_streaks/note_streaks.html`
 4. Set the width/height to taste (the `current_song` overlay is designed
    around ~500×150; `note_streaks` is a transient full-width banner).
 
@@ -83,21 +109,6 @@ them (a few times per second while a song plays).
 
 The exact path of the `output/` folder is logged at startup
 (`output dir: …`).
-
-## How it works
-
-- A browser-side agent (`screen.js`) watches SlopSmith playback via the
-  `window.slopsmith` event bus and the highway getters, and POSTs a
-  small state snapshot to the plugin backend.
-- The backend (`routes.py`) holds that snapshot in memory, assembles the
-  full RockSniffer JSON, and serves it on port 9938 (a tiny standalone
-  HTTP server, separate from SlopSmith's own server). It also writes the
-  text-file outputs and fetches/caches album art.
-
-The JSON served on `:9938` matches RockSniffer's contract — top-level
-`success`, `currentState`, `memoryReadout` (with both flat and nested
-`noteData`), `albumCoverBase64`, and `songDetails` — so widgets written
-against RockSniffer need no changes.
 
 ## License
 
