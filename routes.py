@@ -274,16 +274,16 @@ def _fetch_album_art_b64(filename):
     try:
         import base64
         from urllib.parse import quote
-        # SlopSmith's own frontend builds this as
-        #   /api/song/${encodeURIComponent(filename)}/art
-        # screen.js sends us the DECODED filename, so we encode it once
-        # here. We match encodeURIComponent's unreserved set (it leaves
-        # - _ . ! ~ * ' ( ) unescaped, and unlike Python's default it
-        # DOES escape "/"), so the path matches what the server expects.
-        # This fetch targets the main app on :8000 -- reachable here
-        # because routes.py runs in-process with the SlopSmith server
-        # (the :8000-unreachable-from-OBS problem is browser-side only).
-        enc = quote(filename, safe="!~*'()")
+        # SlopSmith's art route is declared as:
+        #   @app.get("/api/song/{filename:path}/art")
+        # The {filename:path} converter captures slashes as real path
+        # separators, so the filename (which can be a RELATIVE PATH under
+        # the DLC dir, e.g. "cdlc favorites/ACDC - Back In Black_p.psarc")
+        # must keep its "/" LITERAL -- percent-encoding the slash to %2F
+        # breaks the route match. We therefore quote everything that needs
+        # escaping (spaces, etc.) but keep "/" in the safe set. screen.js
+        # sends us the decoded filename, so this single encode is correct.
+        enc = quote(filename, safe="/!~*'()")
         url = "http://127.0.0.1:8000/api/song/%s/art" % enc
         with urllib.request.urlopen(url, timeout=5) as resp:
             if resp.status == 200:
@@ -295,6 +295,56 @@ def _fetch_album_art_b64(filename):
     with _art_lock:
         _art_cache[filename] = b64
     return b64
+
+
+# Metadata cache: filename -> {"album": str, "year": int}. SlopSmith's
+# song_info WebSocket payload (what the browser sees) does NOT include
+# album or year, so we fetch them server-side from the song-detail
+# endpoint by filename. Cached per filename like art.
+_meta_cache = {}
+_meta_lock = threading.Lock()
+
+
+def _fetch_song_meta(filename):
+    """Fetch {album, year} for a song from SlopSmith's detail endpoint.
+
+    GET /api/song/{filename:path} returns the cached metadata dict
+    (title, artist, album, year, duration, ...). We only need album and
+    year -- the browser already gave us the rest. Returns
+    {"album": "", "year": 0} on any failure (widget tolerates blanks).
+    Runs in-process against :8000, which is reachable here (the
+    OBS-can't-reach-8000 issue is browser-side only)."""
+    empty = {"album": "", "year": 0}
+    if not filename:
+        return dict(empty)
+    with _meta_lock:
+        if filename in _meta_cache:
+            return dict(_meta_cache[filename])
+    result = dict(empty)
+    try:
+        import json as _json
+        from urllib.parse import quote
+        # Same {filename:path} route convention as art: keep "/" literal.
+        enc = quote(filename, safe="/!~*'()")
+        url = "http://127.0.0.1:8000/api/song/%s" % enc
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            if resp.status == 200:
+                meta = _json.loads(resp.read().decode("utf-8"))
+                if isinstance(meta, dict):
+                    result["album"] = str(meta.get("album", "") or "")
+                    # year is stored as TEXT and may be "", "1980", etc.
+                    year_raw = meta.get("year", "") or ""
+                    try:
+                        result["year"] = int(str(year_raw).strip()) if str(year_raw).strip() else 0
+                    except (TypeError, ValueError):
+                        result["year"] = 0
+    except Exception as exc:  # noqa: BLE001 -- metadata is best-effort
+        if _log:
+            _log.debug("SlopSniffer: song meta fetch failed for %r: %s", filename, exc)
+        result = dict(empty)
+    with _meta_lock:
+        _meta_cache[filename] = dict(result)
+    return result
 
 
 # ── Text-file output layer ──────────────────────────────────────────────
@@ -408,6 +458,16 @@ def _apply_browser_state(incoming):
         b64 = _fetch_album_art_b64(filename)
         state["albumCoverBase64"] = b64
         sd["albumArt"] = b64
+
+        # Album name / year aren't in the browser's song_info, so fill
+        # them from SlopSmith's song-detail endpoint by filename. A
+        # browser-supplied value (if a future build adds it) still wins.
+        if not sd["albumName"] or not sd["albumYear"]:
+            meta = _fetch_song_meta(filename)
+            if not sd["albumName"]:
+                sd["albumName"] = meta.get("album", "")
+            if not sd["albumYear"]:
+                sd["albumYear"] = int(meta.get("year", 0) or 0)
 
     return state
 
