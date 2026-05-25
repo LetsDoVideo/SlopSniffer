@@ -644,18 +644,31 @@ def setup(app, context):
     import os
 
     # The plugin's own install directory -- this file sits at its root,
-    # next to addons/. We write the text-file outputs into <plugin>/output/
-    # so the location is standard and predictable ("the SlopSniffer plugin
-    # folder, output subfolder"), self-contained, and can't collide with
-    # SlopSmith's shared config dir or another plugin's files. The README
-    # documents this path so users never have to dig through a log.
+    # next to addons/. Used below to locate the bundled widgets.
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
-    _output_dir = os.path.join(plugin_dir, "output")
+
+    # Text-file outputs go in the user's home folder, NOT inside the plugin
+    # dir. Two hard reasons:
+    #   1. The Plugin Manager ATOMICALLY SWAPS the whole plugin directory on
+    #      every update (it re-downloads the repo zip and replaces the
+    #      folder), which would wipe an in-plugin output/ folder and break
+    #      any OBS source pointing at it.
+    #   2. The plugin dir lives under a hidden, deeply-buried per-user
+    #      app-data path (e.g. %APPDATA%\slopsmith-desktop\plugins\... on
+    #      Windows) that streamers can't reasonably find or browse to.
+    # ~/Documents/SlopSniffer/output/ is visible, identical on every
+    # machine, and survives plugin updates. ~/SlopSniffer/output is the
+    # fallback if a Documents folder can't be located.
+    home = os.path.expanduser("~")
+    docs = os.path.join(home, "Documents")
+    base = docs if os.path.isdir(docs) else home
+    _output_dir = os.path.join(base, "SlopSniffer", "output")
     try:
         os.makedirs(_output_dir, exist_ok=True)
     except OSError as exc:
         if _log:
-            _log.warning("SlopSniffer: could not create output dir: %s", exc)
+            _log.warning("SlopSniffer: could not create output dir %s: %s",
+                         _output_dir, exc)
         _output_dir = None
 
     # Locate the bundled addons/ dir (sits next to this file in the plugin
