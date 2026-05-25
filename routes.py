@@ -47,6 +47,13 @@ _log = None
 _output_dir = None
 _server = None
 _server_thread = None
+# Absolute path to the bundled addons/ dir, so the :9938 server can serve
+# the widget files itself. Set in setup(). The :8000 main app is NOT a
+# reliable URL for OBS on the Desktop build (the Python server runs as an
+# internal Electron subprocess and its port isn't published to the host),
+# so we serve the widgets from our own :9938 server, which OBS can always
+# reach -- it's the same server the widgets already poll for JSON.
+_addons_dir = None
 
 # Album-art cache: filename -> base64 jpeg string. SlopSmith serves art
 # at /api/song/<encoded-filename>/art; we fetch once per song and cache.
@@ -101,6 +108,34 @@ def _empty_state():
 
 # ── :9938 stdlib HTTP server ────────────────────────────────────────────
 
+# Explicit MIME map for the widget files we serve. We avoid the stdlib
+# `mimetypes` module because its results vary by OS / registry (notably
+# .js is sometimes reported as text/plain on Windows, which breaks script
+# loading). This covers every extension in the bundled addons/ tree.
+_MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".json": "application/json; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+}
+
+
+def _guess_content_type(path):
+    import os
+    ext = os.path.splitext(path)[1].lower()
+    return _MIME_TYPES.get(ext, "application/octet-stream")
+
+
 class _SnifferHandler(BaseHTTPRequestHandler):
     """Serves the RockSniffer JSON on GET /. CORS-open for OBS."""
 
@@ -117,12 +152,71 @@ class _SnifferHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        # Static widget files live under /addons/... -- serve them from
+        # our own server so OBS has a reachable URL on every install type.
+        # Everything else (notably bare "/") returns the RockSniffer JSON,
+        # preserving drop-in compatibility with existing widgets that poll
+        # http://127.0.0.1:9938 with no path.
+        path = self.path.split("?", 1)[0].split("#", 1)[0]
+        if path.startswith("/addons/") or path == "/addons":
+            self._serve_static(path)
+            return
         with _state_lock:
             payload = dict(_state) if _state else _empty_state()
         try:
             self._write_json(payload)
         except (BrokenPipeError, ConnectionResetError):
             # OBS closes sockets aggressively between polls -- not an error.
+            pass
+
+    def _serve_static(self, url_path):
+        """Serve a file from the bundled addons/ dir. Read-only, GET-only,
+        with strict path-traversal protection."""
+        import os
+        import posixpath
+        from urllib.parse import unquote
+
+        if not _addons_dir:
+            self.send_error(404, "addons not available")
+            return
+
+        # url_path looks like "/addons/current_song/current_song.html".
+        # Strip the "/addons" prefix to get the path relative to the dir.
+        rel = unquote(url_path[len("/addons"):]).lstrip("/")
+        # Normalise and reject any traversal that escapes the addons dir.
+        # posixpath.normpath collapses ".." segments; we then verify the
+        # resolved absolute path is still inside _addons_dir.
+        safe_rel = posixpath.normpath(rel)
+        if safe_rel.startswith("..") or os.path.isabs(safe_rel):
+            self.send_error(403, "forbidden")
+            return
+        # Translate forward slashes (URL) to OS separators.
+        parts = [p for p in safe_rel.split("/") if p not in ("", ".")]
+        target = os.path.join(_addons_dir, *parts) if parts else _addons_dir
+        target = os.path.abspath(target)
+        if os.path.commonpath([target, os.path.abspath(_addons_dir)]) != os.path.abspath(_addons_dir):
+            self.send_error(403, "forbidden")
+            return
+        if not os.path.isfile(target):
+            self.send_error(404, "not found")
+            return
+
+        ctype = _guess_content_type(target)
+        try:
+            with open(target, "rb") as fh:
+                body = fh.read()
+        except OSError:
+            self.send_error(404, "not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        # Same-origin as the JSON, but keep CORS open for consistency.
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
             pass
 
     def do_OPTIONS(self):
@@ -180,8 +274,17 @@ def _fetch_album_art_b64(filename):
     try:
         import base64
         from urllib.parse import quote
-        # SlopSmith serves art on the main app (same host, port 8000).
-        url = "http://127.0.0.1:8000/api/song/%s/art" % quote(filename, safe="")
+        # SlopSmith's own frontend builds this as
+        #   /api/song/${encodeURIComponent(filename)}/art
+        # screen.js sends us the DECODED filename, so we encode it once
+        # here. We match encodeURIComponent's unreserved set (it leaves
+        # - _ . ! ~ * ' ( ) unescaped, and unlike Python's default it
+        # DOES escape "/"), so the path matches what the server expects.
+        # This fetch targets the main app on :8000 -- reachable here
+        # because routes.py runs in-process with the SlopSmith server
+        # (the :8000-unreachable-from-OBS problem is browser-side only).
+        enc = quote(filename, safe="!~*'()")
+        url = "http://127.0.0.1:8000/api/song/%s/art" % enc
         with urllib.request.urlopen(url, timeout=5) as resp:
             if resp.status == 200:
                 b64 = base64.b64encode(resp.read()).decode("ascii")
@@ -311,7 +414,7 @@ def _apply_browser_state(incoming):
 
 def setup(app, context):
     """Plugin entry point. Registers the ingest route and starts :9938."""
-    global _log, _output_dir
+    global _log, _output_dir, _addons_dir
     _log = context.get("log")
     # Write the RockSniffer text-file outputs under the plugin's config
     # dir so they're easy to find and survive restarts.
@@ -325,6 +428,15 @@ def setup(app, context):
             if _log:
                 _log.warning("SlopSniffer: could not create output dir: %s", exc)
             _output_dir = None
+
+    # Locate the bundled addons/ dir (sits next to this file in the plugin
+    # tree) so the :9938 server can serve the widget files itself. This is
+    # set BEFORE starting the server so the handler can reference it.
+    addons_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "addons")
+    if os.path.isdir(addons_dir):
+        _addons_dir = addons_dir
+    elif _log:
+        _log.warning("SlopSniffer: addons dir not found at %s", addons_dir)
 
     # Seed the idle snapshot so :9938 has something widget-safe to serve
     # before the first browser POST.
@@ -362,6 +474,20 @@ def setup(app, context):
     async def read_state():
         with _state_lock:
             return JSONResponse(dict(_state) if _state else _empty_state())
+
+    # The bundled widgets are served by our own :9938 server (see
+    # _SnifferHandler._serve_static), NOT by the SlopSmith main app on
+    # :8000. On the Desktop build, :8000 is an internal Electron subprocess
+    # port that isn't reliably reachable from OBS or a browser, whereas
+    # :9938 is our own socket and is always reachable -- it's the same
+    # server the widgets poll for JSON, so widget + data are same-origin.
+    if _addons_dir and _log:
+        _log.info(
+            "SlopSniffer: widgets served at "
+            "http://127.0.0.1:%d/addons/current_song/current_song.html "
+            "and http://127.0.0.1:%d/addons/note_streaks/note_streaks.html",
+            SNIFFER_PORT, SNIFFER_PORT,
+        )
 
     if _log:
         _log.info("SlopSniffer: ready (state ingest registered, output dir: %s)", _output_dir)

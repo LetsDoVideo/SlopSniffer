@@ -70,21 +70,25 @@
     function _buildSnapshot() {
         var info = _songInfo();
         var arrangements = Array.isArray(info.arrangements) ? info.arrangements : [];
-        // CLAUDE.md / song_info: arrangement_index identifies the active
-        // arrangement; arrangements is the full switcher list.
+        // arrangement_index identifies the active arrangement;
+        // arrangements is the full switcher list.
         var arrIdx = (typeof info.arrangement_index === 'number') ? info.arrangement_index : 0;
 
         return {
             currentState: _currentState,
-            // filename is the playSong arg; song_info exposes it on the
-            // highway snapshot per CLAUDE.md (getSongInfo includes filename).
-            filename: info.filename || _lastFilename || '',
+            // The filename is NOT in getSongInfo()'s live return (despite
+            // the docs listing it) -- so we capture it from the playSong()
+            // call argument instead (see _wire). We store it DECODED
+            // (human-readable); the backend re-encodes once for the
+            // /api/song/<filename>/art lookup, matching how SlopSmith's own
+            // frontend builds that URL.
+            filename: _lastFilename || '',
             songName: info.title || '',
             artistName: info.artist || '',
-            // albumName / albumYear are NOT in the documented song_info
-            // payload -- send what we have (often empty) and let the
-            // widget degrade gracefully. Populated if a future SlopSmith
-            // adds them to getSongInfo().
+            // albumName / albumYear are NOT in the song_info payload at all
+            // -- the backend resolves them from meta_db by filename. We
+            // send blanks here; the widget degrades gracefully if the
+            // backend can't resolve them either.
             albumName: info.album || info.albumName || '',
             albumYear: info.year || info.albumYear || 0,
             songLength: (typeof info.duration === 'number') ? info.duration : 0,
@@ -148,7 +152,9 @@
     function _onPlay() {
         _currentState = STATE_PLAYING;
         var info = _songInfo();
-        if (info.filename) _lastFilename = info.filename;
+        // NOTE: filename is captured by the playSong wrapper (_wire), not
+        // from getSongInfo() -- the live getSongInfo() return doesn't
+        // include it. _lastFilename is already set by the time play fires.
         _lastSongInfoComplete = !!info.title;
         _postNow();
         _startPolling();
@@ -179,6 +185,46 @@
         }
     }
 
+    // Capture the current song's filename. getSongInfo() does NOT expose
+    // it in the live build, but it's the first argument to playSong() and
+    // it rides along on the arrangement:changed event payload. We store it
+    // DECODED so the backend can re-encode once for the art lookup and so
+    // the text outputs are human-readable.
+    function _captureFilename(raw) {
+        if (!raw) return;
+        var decoded = raw;
+        try { decoded = decodeURIComponent(raw); } catch (e) { /* already decoded */ }
+        _lastFilename = decoded;
+    }
+
+    function _wrapPlaySong() {
+        if (typeof window === 'undefined' || typeof window.playSong !== 'function') {
+            return false;
+        }
+        // Idempotency guard: never double-wrap (e.g. if _wire retries).
+        if (window.playSong.__slopsniffer_wrapped) return true;
+        var original = window.playSong;
+        var wrapped = function (filename /*, arrangement */) {
+            // Capture BEFORE calling through, so the filename is set by the
+            // time the song:play event (fired from inside) reaches _onPlay.
+            _captureFilename(filename);
+            // Always call and await the original so we don't break the
+            // wrapper chain for other plugins (notedetect, 3dhighway, ...).
+            return original.apply(this, arguments);
+        };
+        wrapped.__slopsniffer_wrapped = true;
+        window.playSong = wrapped;
+        return true;
+    }
+
+    function _onArrangementChanged(e) {
+        // Carries { index, filename } -- a reliable backup filename source
+        // (and keeps us correct if the user switches arrangements).
+        if (e && e.detail && e.detail.filename) {
+            _captureFilename(e.detail.filename);
+        }
+    }
+
     function _wire() {
         var sm = _slopsmith();
         if (!sm || typeof sm.on !== 'function') {
@@ -192,6 +238,16 @@
         sm.on('song:pause', _onPauseOrEnd);
         sm.on('song:ended', _onPauseOrEnd);
         sm.on('screen:changed', _onScreenChanged);
+        sm.on('arrangement:changed', _onArrangementChanged);
+
+        // Wrap playSong to capture the filename. If it's not defined yet,
+        // retry on the same cadence as the bus check.
+        if (!_wrapPlaySong()) {
+            var tries = 0;
+            var iv = setInterval(function () {
+                if (_wrapPlaySong() || ++tries > 50) clearInterval(iv);
+            }, 100);
+        }
 
         // Post an initial idle snapshot so the backend (and any widget
         // already open in OBS) reflects "in menus" immediately on load.
