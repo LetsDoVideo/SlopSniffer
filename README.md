@@ -3,7 +3,7 @@
 A drop-in [RockSniffer](https://github.com/kokolihapihvi/RockSniffer)
 replacement built as a [SlopSmith](https://github.com/byrongamatos/slopsmith)
 plugin. It lets your existing Rocksmith-streaming OBS overlays keep
-working when you switch from Rocksmith to SlopSmith — no widget changes
+working when you switch from Rocksmith to SlopSmith. No widget changes
 needed.
 
 SlopSniffer does three things:
@@ -17,16 +17,9 @@ SlopSniffer does three things:
    `album_cover.jpeg`) for streamers who use OBS Text (GDI+) / Image
    sources instead of a browser overlay.
 
-> **v0.1.0 scope:** song info (title / artist / album / timer / album
-> art) is fully live. Accuracy and note-streak counters ship as zeros in
-> this version — the JSON shape is complete and those fields populate in
-> v0.2.0 once SlopSniffer subscribes to the Note Detection plugin's
-> scoring events. The `note_streaks` widget will sit silent until then,
-> which is correct behaviour.
-
 ## Install
 
-SlopSniffer is a plain plugin — no build step. Clone it into SlopSmith's
+SlopSniffer is a plain plugin, no build step. Clone it into SlopSmith's
 `plugins/` folder under the directory name `slopsniffer`:
 
 ```
