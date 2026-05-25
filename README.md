@@ -57,9 +57,8 @@ will just work once SlopSniffer is running.
 
 ## Using the text-file output (OBS Text / Image sources)
 
-SlopSniffer writes RockSniffer-style output files into an output/
-folder inside the SlopSniffer plugin folder itself (the same folder this
-README is in, alongside addons/):
+SlopSniffer writes RockSniffer-style output files into a SlopSniffer/output/ folder in your Documents folder.
+On Windows that's C:\Users\<you>\Documents\SlopSniffer\output\. 
 
 | File | Contents |
 | --- | --- |
@@ -77,8 +76,6 @@ source pointing at `album_cover.jpeg`. OBS Text/Image sources re-read
 their file automatically, so they update live as SlopSniffer rewrites
 them (a few times per second while a song plays).
 
-The exact path of the `output/` folder is logged at startup
-(`output dir: …`).
 
 ## License
 
