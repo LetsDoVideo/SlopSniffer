@@ -57,8 +57,9 @@ will just work once SlopSniffer is running.
 
 ## Using the text-file output (OBS Text / Image sources)
 
-SlopSniffer writes RockSniffer-style output files into the plugin's
-config directory, under an `output/` folder:
+SlopSniffer writes RockSniffer-style output files into an output/
+folder inside the SlopSniffer plugin folder itself (the same folder this
+README is in, alongside addons/):
 
 | File | Contents |
 | --- | --- |
