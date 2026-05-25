@@ -28,63 +28,32 @@ SlopSniffer does three things:
 
 That's it. The Plugin Manager fetches the plugin into your plugins
 folder for you. After restart, SlopSniffer appears under **Installed
-Plugins**, and you should see a log line like
-`SlopSniffer: serving RockSniffer JSON on 127.0.0.1:9938`.
-
-<details>
-<summary>Manual install (advanced — only if you're not using the Plugin Manager)</summary>
-
-SlopSniffer is a plain plugin with no build step, so you can also drop
-it into SlopSmith's plugins folder by hand. The plugins directory
-location depends on your platform (see the SlopSmith Desktop README);
-clone the repo into it, then restart SlopSmith:
-
-```
-git clone https://github.com/LetsDoVideo/SlopSniffer.git
-# move the cloned folder into SlopSmith's plugins/ directory, then
-# restart SlopSmith
-```
-
-The folder name doesn't matter — the plugin's `id` (`slopsniffer`) comes
-from `plugin.json`, not the directory name.
-
-</details>
+Plugins**.
 
 > **Already running the real RockSniffer?** It owns port 9938, so
-> SlopSniffer will log a bind warning and skip its JSON server until you
-> close RockSniffer. You only need one of them.
-
-## Verify it's working
-
-Play any song in SlopSmith, then open `http://127.0.0.1:9938/` in a
-browser. You should see a JSON blob with the current song's title,
-artist, and a `songTimer` that advances as the song plays.
+> SlopSniffer won't work until you close RockSniffer.
 
 ## Using the bundled widgets in OBS
 
-The widgets live in this plugin's `addons/` folder and load directly
-from disk via a `file://` URL — exactly like RockSniffer's own addons.
-
-First, find where the plugin was installed. If you used the Plugin
-Manager, the folder lives in SlopSmith's plugins directory (the location
-varies by platform — see the SlopSmith Desktop README for your OS; on
-Windows it's typically under `%APPDATA%\slopsmith-desktop\plugins\`).
-The folder will be named after the repo (e.g. `SlopSniffer`).
+SlopSniffer comes with two ready-to-use overlays. To add one to your
+stream:
 
 1. In OBS, add a **Browser** source.
-2. Check **Local file**.
-3. Browse to the widget HTML inside the installed plugin's `addons/`
-   folder:
+2. In the **URL** field, paste the address for the overlay you want:
    - Now-playing overlay:
-     `…/plugins/<SlopSniffer folder>/addons/current_song/current_song.html`
+     `http://127.0.0.1:9938/addons/current_song/current_song.html`
    - Note-streak banner:
-     `…/plugins/<SlopSniffer folder>/addons/note_streaks/note_streaks.html`
-4. Set the width/height to taste (the `current_song` overlay is designed
-   around ~500×150; `note_streaks` is a transient full-width banner).
+     `http://127.0.0.1:9938/addons/note_streaks/note_streaks.html`
+3. Set the width and height to taste (the now-playing overlay looks good
+   around 500×150; the note-streak banner is a brief full-width pop-up).
 
-The widgets read their server address from `addons/config.js`, which is
-pre-set to `127.0.0.1:9938` — the same default RockSniffer used, so no
-editing is needed.
+> If OBS is running on a different computer than SlopSmith, replace
+> `127.0.0.1` with the IP address of the machine running SlopSmith.
+
+**Already using RockSniffer overlays?** They'll keep working with no
+changes. SlopSniffer answers at the same address RockSniffer used
+(`127.0.0.1:9938`), so any overlay you already had pointed at RockSniffer 
+will just work once SlopSniffer is running.
 
 ## Using the text-file output (OBS Text / Image sources)
 
