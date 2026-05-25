@@ -31,6 +31,74 @@
     var _lastSongInfoComplete = false;
     var _pollTimer = null;
 
+    // ── Scoring state (v0.2.0) ──────────────────────────────────────
+    // Populated from notedetect's note:hit / note:miss events on the
+    // window.slopsmith bus. Per-song: reset when a new song starts so
+    // accuracy/streaks reflect the current play-through (matching how
+    // RockSniffer scores a single run), NOT a cross-song running total.
+    // A pause does NOT reset -- it's the same song.
+    //
+    // notedetect emits: window.slopsmith.emit(hit?'note:hit':'note:miss', judgment)
+    // and emit() wraps the judgment in a CustomEvent, so the judgment is
+    // in e.detail. We only need the hit/miss split for counting; the
+    // judgment's chord/score/strings fields aren't needed for these
+    // aggregate stats.
+    var _score = {
+        hits: 0,
+        misses: 0,
+        currentHitStreak: 0,
+        highestHitStreak: 0,
+        currentMissStreak: 0
+    };
+
+    // The filename whose play-through the current _score counters
+    // describe. Used to decide reset-vs-keep when song:play fires (a new
+    // song resets; a resume keeps).
+    var _scoredFilename = '';
+
+    function _resetScore() {
+        _score.hits = 0;
+        _score.misses = 0;
+        _score.currentHitStreak = 0;
+        _score.highestHitStreak = 0;
+        _score.currentMissStreak = 0;
+    }
+
+    function _onNoteHit() {
+        _score.hits += 1;
+        _score.currentHitStreak += 1;
+        _score.currentMissStreak = 0;
+        if (_score.currentHitStreak > _score.highestHitStreak) {
+            _score.highestHitStreak = _score.currentHitStreak;
+        }
+        // Don't _postNow() per note -- notes arrive far faster than the
+        // widgets poll (~1 Hz), and the 250ms timer already carries the
+        // latest score. Posting per note would be a needless flood.
+    }
+
+    function _onNoteMiss() {
+        _score.misses += 1;
+        _score.currentMissStreak += 1;
+        _score.currentHitStreak = 0;
+    }
+
+    // Derive the RockSniffer noteData block from the running counters.
+    // Accuracy is hits / total-judged * 100 (0.0 when nothing judged yet,
+    // so the widget shows 0.00% cleanly before the first note).
+    function _scoreFields() {
+        var total = _score.hits + _score.misses;
+        var accuracy = total > 0 ? (_score.hits / total) * 100.0 : 0.0;
+        return {
+            accuracy: accuracy,
+            totalNotes: total,
+            totalNotesHit: _score.hits,
+            totalNotesMissed: _score.misses,
+            currentHitStreak: _score.currentHitStreak,
+            highestHitStreak: _score.highestHitStreak,
+            currentMissStreak: _score.currentMissStreak
+        };
+    }
+
     function _slopsmith() {
         return (typeof window !== 'undefined') ? window.slopsmith : null;
     }
@@ -95,7 +163,12 @@
             numArrangements: arrangements.length,
             arrangements: arrangements,
             arrangementID: String(arrIdx),
-            songTimer: _songTime()
+            songTimer: _songTime(),
+            // Scoring (v0.2.0) -- from notedetect note:hit/note:miss.
+            // Sent every snapshot so the moving timer post also carries
+            // the latest score. The backend maps these into the
+            // RockSniffer memoryReadout.noteData block.
+            score: _scoreFields()
         };
     }
 
@@ -156,6 +229,15 @@
         // from getSongInfo() -- the live getSongInfo() return doesn't
         // include it. _lastFilename is already set by the time play fires.
         _lastSongInfoComplete = !!info.title;
+        // Reset scoring only when this is a *different* song than the one
+        // we were last scoring -- song:play also fires on resume-from-pause,
+        // and we must not wipe the run's accuracy/streaks just because the
+        // user paused and resumed. _scoredFilename tracks the song the
+        // current counters belong to.
+        if (_lastFilename && _lastFilename !== _scoredFilename) {
+            _resetScore();
+            _scoredFilename = _lastFilename;
+        }
         _postNow();
         _startPolling();
     }
@@ -180,6 +262,12 @@
             _currentState = STATE_MENU;
             _lastFilename = '';
             _lastSongInfoComplete = false;
+            // Clear scoring on the way back to menus so the next song
+            // starts from zero even if filename capture is flaky (belt &
+            // braces with the new-song reset in _onPlay). The idle
+            // snapshot then reports zeros, which is correct for "no song".
+            _resetScore();
+            _scoredFilename = '';
             _stopPolling();
             _postNow();
         }
@@ -239,6 +327,13 @@
         sm.on('song:ended', _onPauseOrEnd);
         sm.on('screen:changed', _onScreenChanged);
         sm.on('arrangement:changed', _onArrangementChanged);
+
+        // Scoring (v0.2.0): notedetect publishes per-note judgments on the
+        // same bus. If notedetect isn't installed, these simply never
+        // fire and the score stays at zeros -- graceful degradation, no
+        // dependency on the plugin being present.
+        sm.on('note:hit', _onNoteHit);
+        sm.on('note:miss', _onNoteMiss);
 
         // Wrap playSong to capture the filename. If it's not defined yet,
         // retry on the same cadence as the bus check.

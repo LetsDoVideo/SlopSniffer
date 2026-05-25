@@ -19,9 +19,13 @@ Architecture
 - OBS browser sources fetch cross-origin, so the :9938 responses MUST
   carry ``Access-Control-Allow-Origin: *`` or the widgets fail silently.
 
-In v0.1.0 the accuracy / streak fields ship as zeros (the JSON shape is
-complete; those fields populate in v0.2.0 once we subscribe to the
-note_detect ``note:hit`` / ``note:miss`` events on ``window.slopsmith``).
+As of v0.2.0 the accuracy / streak fields are live: the browser agent
+(screen.js) subscribes to note_detect's ``note:hit`` / ``note:miss``
+events on ``window.slopsmith``, maintains per-song counters, and sends
+them in each snapshot's ``score`` block, which we map into the
+RockSniffer ``memoryReadout.noteData``. When note_detect isn't installed
+the events never fire and the fields stay at zero -- the same graceful
+state earlier versions always showed.
 """
 
 import json
@@ -533,8 +537,8 @@ def _apply_browser_state(incoming):
     The browser sends what it already knows from highway.getSongInfo()
     and highway.getTime() -- title, artist, duration, arrangement count,
     timer, and a currentState. We assemble the RockSniffer-shaped dict,
-    fetch album art by filename, and (in v0.2.0) merge scoring. v0.1.0
-    leaves accuracy/streaks at zero."""
+    fetch album art by filename, and merge the scoring counters the
+    browser tracked from note_detect into the noteData block."""
     state = _empty_state()
 
     cur = incoming.get("currentState")
@@ -563,6 +567,51 @@ def _apply_browser_state(incoming):
         mr["songTimer"] = float(incoming.get("songTimer", 0) or 0.0)
     except (TypeError, ValueError):
         mr["songTimer"] = 0.0
+
+    # Scoring (v0.2.0). The browser agent (screen.js) tracks notedetect's
+    # note:hit / note:miss events and sends running per-song counters in
+    # `score`. We map them into both the RockSniffer noteData block (which
+    # the bundled widgets read) and the legacy top-level memoryReadout
+    # mirror fields (which some older overlays read). When notedetect
+    # isn't installed, screen.js sends all zeros, so the widgets show
+    # 0.00% / (0) -- the same graceful state as v0.1.0.
+    score = incoming.get("score") or {}
+
+    def _num(key, default=0):
+        try:
+            return int(score.get(key, default) or 0)
+        except (TypeError, ValueError):
+            return default
+
+    accuracy = 0.0
+    try:
+        accuracy = float(score.get("accuracy", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        accuracy = 0.0
+
+    total = _num("totalNotes")
+    hit = _num("totalNotesHit")
+    missed = _num("totalNotesMissed")
+    cur_hit = _num("currentHitStreak")
+    high_hit = _num("highestHitStreak")
+    cur_miss = _num("currentMissStreak")
+
+    nd = mr["noteData"]
+    nd["Accuracy"] = accuracy
+    nd["TotalNotes"] = total
+    nd["TotalNotesHit"] = hit
+    nd["TotalNotesMissed"] = missed
+    nd["CurrentHitStreak"] = cur_hit
+    nd["HighestHitStreak"] = high_hit
+    nd["CurrentMissStreak"] = cur_miss
+
+    # Legacy top-level mirror (older overlays read these directly off
+    # memoryReadout rather than the nested noteData).
+    mr["currentHitStreak"] = cur_hit
+    mr["highestHitStreak"] = high_hit
+    mr["totalNotesHit"] = hit
+    mr["totalNotesMissed"] = missed
+    mr["currentMissStreak"] = cur_miss
 
     # Album art -- only meaningful while a song is loaded.
     if filename and state["currentState"] == STATE_PLAYING:
