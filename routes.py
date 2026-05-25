@@ -641,23 +641,27 @@ def setup(app, context):
     _ctx_meta_db = context.get("meta_db")
     _ctx_get_dlc_dir = context.get("get_dlc_dir")
     _ctx_get_art_cache_dir = context.get("get_art_cache_dir")
-    # Write the RockSniffer text-file outputs under the plugin's config
-    # dir so they're easy to find and survive restarts.
     import os
-    config_dir = context.get("config_dir")
-    if config_dir:
-        _output_dir = os.path.join(str(config_dir), "output")
-        try:
-            os.makedirs(_output_dir, exist_ok=True)
-        except OSError as exc:
-            if _log:
-                _log.warning("SlopSniffer: could not create output dir: %s", exc)
-            _output_dir = None
+
+    # The plugin's own install directory -- this file sits at its root,
+    # next to addons/. We write the text-file outputs into <plugin>/output/
+    # so the location is standard and predictable ("the SlopSniffer plugin
+    # folder, output subfolder"), self-contained, and can't collide with
+    # SlopSmith's shared config dir or another plugin's files. The README
+    # documents this path so users never have to dig through a log.
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    _output_dir = os.path.join(plugin_dir, "output")
+    try:
+        os.makedirs(_output_dir, exist_ok=True)
+    except OSError as exc:
+        if _log:
+            _log.warning("SlopSniffer: could not create output dir: %s", exc)
+        _output_dir = None
 
     # Locate the bundled addons/ dir (sits next to this file in the plugin
     # tree) so the :9938 server can serve the widget files itself. This is
     # set BEFORE starting the server so the handler can reference it.
-    addons_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "addons")
+    addons_dir = os.path.join(plugin_dir, "addons")
     if os.path.isdir(addons_dir):
         _addons_dir = addons_dir
     elif _log:
