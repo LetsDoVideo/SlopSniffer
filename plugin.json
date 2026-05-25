@@ -1,8 +1,0 @@
-{
-  "id": "slopsniffer",
-  "name": "SlopSniffer",
-  "version": "0.1.0",
-  "private": false,
-  "script": "screen.js",
-  "routes": "routes.py"
-}
